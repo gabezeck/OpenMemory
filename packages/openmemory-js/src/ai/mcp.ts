@@ -591,6 +591,194 @@ export const create_mcp_srv = () => {
             };
         },
     );
+    registry.tool(
+        "openmemory_weekly_review",
+        "Retrieve a structured summary of memory activity over the past N days for one or more users. Returns recent HSG memories and temporal facts grouped by user_id, with new-vs-reinforced counts, sector distribution, and content previews — designed for weekly reflection and pattern analysis.",
+        {
+            user_ids: z
+                .array(z.string().trim().min(1))
+                .min(1)
+                .describe(
+                    'User identifiers to include in the review, e.g. ["gabriel", "nigel"]',
+                ),
+            days: z
+                .number()
+                .int()
+                .min(1)
+                .max(90)
+                .default(7)
+                .describe("Number of days to look back (default 7)"),
+            since: z
+                .string()
+                .optional()
+                .describe(
+                    "ISO date string to use as the start of the review window (overrides 'days' if provided)",
+                ),
+            include_memories: z
+                .boolean()
+                .default(true)
+                .describe("Include HSG contextual memories in the review"),
+            include_facts: z
+                .boolean()
+                .default(true)
+                .describe("Include temporal graph facts in the review"),
+            limit_per_user: z
+                .number()
+                .int()
+                .min(1)
+                .max(200)
+                .default(100)
+                .describe(
+                    "Maximum records to fetch per user per data type (memories and facts are each limited independently)",
+                ),
+        },
+        async ({
+            user_ids,
+            days,
+            since,
+            include_memories,
+            include_facts,
+            limit_per_user,
+        }) => {
+            const now = Date.now();
+            const window_ms = since
+                ? new Date(since).getTime()
+                : now - days * 24 * 60 * 60 * 1000;
+
+            const user_results: Record<string, any> = {};
+
+            for (const u of user_ids) {
+                const entry: any = {
+                    user_id: u,
+                    window: {
+                        from: new Date(window_ms).toISOString(),
+                        to: new Date(now).toISOString(),
+                        days: Math.round((now - window_ms) / (24 * 60 * 60 * 1000)),
+                    },
+                };
+
+                if (include_memories) {
+                    const rows = await all_async(
+                        `SELECT * FROM ${memories_table} WHERE user_id = ? AND (created_at >= ? OR last_seen_at >= ?) ORDER BY last_seen_at DESC LIMIT ?`,
+                        [u, window_ms, window_ms, limit_per_user],
+                    );
+
+                    const by_sector: Record<string, number> = {};
+                    const items = rows.map((r) => {
+                        by_sector[r.primary_sector] =
+                            (by_sector[r.primary_sector] || 0) + 1;
+                        return {
+                            id: r.id,
+                            primary_sector: r.primary_sector,
+                            salience: Number((r.salience ?? 0).toFixed(3)),
+                            created_at: new Date(r.created_at).toISOString(),
+                            last_seen_at: new Date(r.last_seen_at).toISOString(),
+                            is_new: r.created_at >= window_ms,
+                            content_preview: trunc(r.content, 240),
+                            tags: p(r.tags || "[]") as string[],
+                        };
+                    });
+
+                    entry.memories = {
+                        total: items.length,
+                        new_count: items.filter((i) => i.is_new).length,
+                        reinforced_count: items.filter((i) => !i.is_new).length,
+                        by_sector,
+                        items,
+                    };
+                }
+
+                if (include_facts) {
+                    const fact_rows = await all_async(
+                        `SELECT * FROM temporal_facts WHERE user_id = ? AND (valid_from >= ? OR last_updated >= ?) ORDER BY last_updated DESC LIMIT ?`,
+                        [u, window_ms, window_ms, limit_per_user],
+                    );
+
+                    entry.facts = {
+                        total: fact_rows.length,
+                        items: fact_rows.map((r) => ({
+                            id: r.id,
+                            subject: r.subject,
+                            predicate: r.predicate,
+                            object: r.object,
+                            confidence: Number((r.confidence ?? 0).toFixed(3)),
+                            valid_from: new Date(r.valid_from).toISOString(),
+                            valid_to: r.valid_to
+                                ? new Date(r.valid_to).toISOString()
+                                : null,
+                            last_updated: new Date(r.last_updated).toISOString(),
+                            is_new: r.valid_from >= window_ms,
+                        })),
+                    };
+                }
+
+                user_results[u] = entry;
+            }
+
+            // Human-readable summary
+            const win_from = new Date(window_ms).toISOString().slice(0, 10);
+            const win_to = new Date(now).toISOString().slice(0, 10);
+            let txt = `## Weekly Memory Review — ${win_from} to ${win_to}\n\n`;
+
+            for (const [uid, data] of Object.entries(user_results)) {
+                txt += `### ${uid}\n`;
+
+                if (data.memories) {
+                    const m = data.memories as any;
+                    txt += `**Memories:** ${m.total} active (${m.new_count} new, ${m.reinforced_count} reinforced)\n`;
+                    const sectors = Object.entries(
+                        m.by_sector as Record<string, number>,
+                    )
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([s, c]) => `${s}(${c})`)
+                        .join(" | ");
+                    if (sectors) txt += `Sectors: ${sectors}\n`;
+                    txt += "\n";
+                    const preview = (m.items as any[]).slice(0, 15);
+                    for (const item of preview) {
+                        const flag = item.is_new ? "[NEW] " : "[↑]   ";
+                        txt += `${flag}[${item.primary_sector}] salience=${item.salience}  ${item.content_preview}\n`;
+                    }
+                    if (m.items.length > 15)
+                        txt += `  …and ${m.items.length - 15} more\n`;
+                    txt += "\n";
+                }
+
+                if (data.facts) {
+                    const f = data.facts as any;
+                    txt += `**Temporal Facts:** ${f.total} created/updated this window\n`;
+                    for (const fact of (f.items as any[]).slice(0, 20)) {
+                        const flag = fact.is_new ? "[NEW] " : "[UPD] ";
+                        txt += `${flag}${fact.subject} ${fact.predicate} ${fact.object} (conf=${fact.confidence})\n`;
+                    }
+                    if (f.items.length > 20)
+                        txt += `  …and ${f.items.length - 20} more\n`;
+                    txt += "\n";
+                }
+            }
+
+            return {
+                content: [
+                    { type: "text", text: txt },
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                window: {
+                                    from: new Date(window_ms).toISOString(),
+                                    to: new Date(now).toISOString(),
+                                },
+                                users: user_results,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                ],
+            };
+        },
+    );
+
     registry.apply(srv);
 
     srv.resource(
@@ -617,6 +805,7 @@ export const create_mcp_srv = () => {
                     "openmemory_reinforce",
                     "openmemory_list",
                     "openmemory_get",
+                    "openmemory_weekly_review",
                 ],
             };
             return {
