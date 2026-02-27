@@ -667,13 +667,17 @@ export const create_mcp_srv = () => {
                     const items = rows.map((r) => {
                         by_sector[r.primary_sector] =
                             (by_sector[r.primary_sector] || 0) + 1;
+                        // Postgres returns bigint columns as strings; coerce to Number
+                        // before passing to new Date() so both backends work correctly.
+                        const created_ms = Number(r.created_at);
+                        const last_seen_ms = Number(r.last_seen_at);
                         return {
                             id: r.id,
                             primary_sector: r.primary_sector,
                             salience: Number((r.salience ?? 0).toFixed(3)),
-                            created_at: new Date(r.created_at).toISOString(),
-                            last_seen_at: new Date(r.last_seen_at).toISOString(),
-                            is_new: r.created_at >= window_ms,
+                            created_at: new Date(created_ms).toISOString(),
+                            last_seen_at: new Date(last_seen_ms).toISOString(),
+                            is_new: created_ms >= window_ms,
                             content_preview: trunc(r.content, 240),
                             tags: p(r.tags || "[]") as string[],
                         };
@@ -696,19 +700,25 @@ export const create_mcp_srv = () => {
 
                     entry.facts = {
                         total: fact_rows.length,
-                        items: fact_rows.map((r) => ({
-                            id: r.id,
-                            subject: r.subject,
-                            predicate: r.predicate,
-                            object: r.object,
-                            confidence: Number((r.confidence ?? 0).toFixed(3)),
-                            valid_from: new Date(r.valid_from).toISOString(),
-                            valid_to: r.valid_to
-                                ? new Date(r.valid_to).toISOString()
-                                : null,
-                            last_updated: new Date(r.last_updated).toISOString(),
-                            is_new: r.valid_from >= window_ms,
-                        })),
+                        items: fact_rows.map((r) => {
+                            // Postgres returns bigint columns as strings; coerce to Number
+                            // before passing to new Date() so both backends work correctly.
+                            const valid_from_ms = Number(r.valid_from);
+                            const last_updated_ms = Number(r.last_updated);
+                            return {
+                                id: r.id,
+                                subject: r.subject,
+                                predicate: r.predicate,
+                                object: r.object,
+                                confidence: Number((r.confidence ?? 0).toFixed(3)),
+                                valid_from: new Date(valid_from_ms).toISOString(),
+                                valid_to: r.valid_to
+                                    ? new Date(Number(r.valid_to)).toISOString()
+                                    : null,
+                                last_updated: new Date(last_updated_ms).toISOString(),
+                                is_new: valid_from_ms >= window_ms,
+                            };
+                        }),
                     };
                 }
 
