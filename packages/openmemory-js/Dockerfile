@@ -3,6 +3,12 @@ FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
 
+# Install native build tools so node-gyp can compile sqlite3 if
+# prebuild-install can't fetch a prebuilt binary (e.g. network blip on Railway).
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
+
 # Copy package manifests to install dependencies
 COPY packages/openmemory-js/package*.json ./
 
