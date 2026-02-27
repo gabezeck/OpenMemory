@@ -4,14 +4,14 @@ FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 
 # Copy package manifests to install dependencies
-COPY package*.json ./
+COPY packages/openmemory-js/package*.json ./
 
 # Install all dependencies (including devDependencies) for build
 RUN npm ci
 
 # Copy source code and build the application
-COPY src/ ./src/
-COPY tsconfig.json ./
+COPY packages/openmemory-js/src/ ./src/
+COPY packages/openmemory-js/tsconfig.json ./
 RUN NODE_OPTIONS="--max-old-space-size=4096" npm run build
 
 # Remove devDependencies to reduce image size for the runtime image
@@ -30,7 +30,7 @@ RUN groupadd --gid 1001 appgroup \
 # Copy only production artifacts from the builder stage
 COPY --from=builder /app/node_modules ./node_modules/
 COPY --from=builder /app/dist ./dist/
-COPY package.json ./
+COPY packages/openmemory-js/package.json ./
 
 # Create a directory for persistent data and secure file permissions
 RUN mkdir -p /data \
